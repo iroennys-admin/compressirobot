@@ -1,23 +1,20 @@
 # Deploy en Koyeb
 
-## 1. Preparar el repo en GitHub
+## Opción A: Imagen con credenciales incluidas (más simple)
 
 ```bash
-git init
-git add .
-git commit -m "initial"
-gh repo create compresor-bot --public --push
+# Buildear con las vars de config.env y pushear a Docker Hub
+./build-and-push.sh
 ```
 
-## 2. Crear el servicio en Koyeb
+En Koyeb: **Worker Service → Docker registry → `iroennys-admin/compresor-bot:latest`**
+No necesitás configurar env vars ni volumen.
 
-Desde [app.koyeb.com](https://app.koyeb.com):
+## Opción B: Build desde GitHub (sin credenciales en la imagen)
 
-- **Type**: Worker (no necesita puerto HTTP)
-- **GitHub**: conectá el repo
-- **Dockerfile**: build automático (ya está incluido)
-
-### Variables de entorno (obligatorias)
+1. Subir el repo a GitHub
+2. En Koyeb: **Worker Service → GitHub → conectar el repo**
+3. Agregar env vars:
 
 | Variable | De dónde sacarla |
 |----------|-----------------|
@@ -26,25 +23,26 @@ Desde [app.koyeb.com](https://app.koyeb.com):
 | `API_HASH` | [my.telegram.org/apps](https://my.telegram.org/apps) |
 | `OWNER_ID` | Tu ID numérico (opcional, `/id` en el bot) |
 
-### Volumen persistente (opcional pero recomendado)
-
-Sin volumen, los usuarios y la cola se pierden al reiniciar.
-
-1. Crear un volumen en Koyeb → `compresor-data` de 1GB
-2. Montarlo en `/data`
-3. Agregar env var: `DATA_DIR=/data`
-
-## 3. Build & Deploy
-
-Koyeb buildpea automáticamente. Si querés hacerlo local primero:
+## Build local (cualquier opción)
 
 ```bash
-docker build -t compresor-bot .
-docker run -e BOT_TOKEN=... -e API_ID=... -e API_HASH=... compresor-bot
+docker build \
+  --build-arg BOT_TOKEN=... \
+  --build-arg API_ID=... \
+  --build-arg API_HASH=... \
+  -t compresor-bot .
+docker run compresor-bot
 ```
+
+## Volumen persistente (opcional)
+
+Sin volumen los datos de usuarios/cola se pierden al reiniciar.
+
+1. Crear volumen en Koyeb → `compresor-data` de 1GB
+2. Montar en `/data`
+3. Env var: `DATA_DIR=/data`
 
 ## Notas
 
-- FFmpeg con libx265 ya viene instalado en la imagen.
-- Los logs del bot se ven en los logs del servicio en Koyeb.
-- Si NO usás volumen, la sesión de Pyrogram se recrea sola en cada deploy.
+- FFmpeg con libx265 ya viene en la imagen.
+- Logs del bot → logs del servicio en Koyeb.
