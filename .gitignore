@@ -1,0 +1,20 @@
+# Sensitive
+compresor_data/config.env
+compresor_data/*.session
+compresor_data/*.session-journal
+compresor_data/bot.db
+
+# Old JSON data files
+compresor_data/users.json
+compresor_data/queue.json
+
+# Temp files
+compresor_data/downloads/
+compresor_data/compressed/
+__pycache__/
+*.pyc
+*.log
+
+# Local dev
+.atl/
+start_compresor.sh

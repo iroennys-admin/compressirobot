@@ -1,0 +1,8 @@
+__pycache__
+*.pyc
+*.log
+.atl
+compresor_data/config.env
+.git
+.gitignore
+start_compresor.sh
