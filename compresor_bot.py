@@ -32,7 +32,7 @@ from pyrogram.errors import FloodWait, RPCError
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_ID = os.getenv("API_ID", "")
 API_HASH = os.getenv("API_HASH", "")
-ADMIN_USERNAME = "nautaii"
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "nautaii")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "compresor_data"))
