@@ -21,7 +21,7 @@ if _env_file.exists():
 
 from pyrogram import Client, filters, enums, idle
 from pyrogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 )
 from pyrogram.errors import FloodWait, RPCError
 
@@ -1443,6 +1443,26 @@ async def startup():
         print(f"✅ FFmpeg: {ver}")
     except:
         print("❌ FFmpeg no encontrado. Instálalo para usar el bot.")
+
+    # Registrar comandos en la UI de Telegram
+    try:
+        await app.set_bot_commands([
+            BotCommand("start", "👋 Bienvenida"),
+            BotCommand("help", "📖 Comandos disponibles"),
+            BotCommand("miperfil", "👤 Tu perfil y estadísticas"),
+            BotCommand("miplan", "📋 Tu plan actual"),
+            BotCommand("planes", "📊 Ver planes disponibles"),
+            BotCommand("calidad", "🎛️ Cambiar calidad"),
+            BotCommand("cola", "🧵 Estado de la cola"),
+            BotCommand("cancelar", "❌ Cancelar compresión"),
+            BotCommand("reporte", "📝 Reportar problema"),
+            BotCommand("id", "🆔 Tu ID"),
+            BotCommand("ping", "🏓 Verificar respuesta"),
+            BotCommand("velocidad", "⚡ Test de velocidad"),
+            BotCommand("about", "ℹ️ Info del bot"),
+        ])
+    except:
+        pass
 
     print("🤖 Bot listo!")
     print("━" * 40)
