@@ -1,29 +1,36 @@
 # Deploy en Koyeb
 
-## Opción A: Imagen con credenciales incluidas (más simple)
+## Auto-deploy desde GitHub (recomendado)
+
+Cada vez que pusheás al repo, Koyeb buildcea y deploya solo.
+
+1. En [app.koyeb.com](https://app.koyeb.com) → **Create Service**
+2. **Type**: Worker (no necesita puerto HTTP)
+3. **GitHub** → conectar el repo `iroennys-admin/wsi`
+4. **Builder**: Dockerfile
+5. Agregar environment variables (obligatorias):
+
+| Variable | Valor |
+|----------|-------|
+| `BOT_TOKEN` | Token de [@BotFather](https://t.me/BotFather) |
+| `API_ID` | De [my.telegram.org/apps](https://my.telegram.org/apps) |
+| `API_HASH` | De [my.telegram.org/apps](https://my.telegram.org/apps) |
+
+6. **Deploy**
+
+A partir de ahí, cada `git push` redeploya automáticamente.
+
+## Build local con credenciales incluidas
+
+Para correr en cualquier lado sin setear env vars:
 
 ```bash
-# Buildear con las vars de config.env y pushear a Docker Hub
 ./build-and-push.sh
 ```
 
-En Koyeb: **Worker Service → Docker registry → `iroennys-admin/compresor-bot:latest`**
-No necesitás configurar env vars ni volumen.
+Esto buildcea la imagen con las vars de `compresor_data/config.env` y la pushea a Docker Hub. En Koyeb creás Worker Service → Docker registry → `iroennys-admin/compresor-bot:latest`.
 
-## Opción B: Build desde GitHub (sin credenciales en la imagen)
-
-1. Subir el repo a GitHub
-2. En Koyeb: **Worker Service → GitHub → conectar el repo**
-3. Agregar env vars:
-
-| Variable | De dónde sacarla |
-|----------|-----------------|
-| `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) |
-| `API_ID` | [my.telegram.org/apps](https://my.telegram.org/apps) |
-| `API_HASH` | [my.telegram.org/apps](https://my.telegram.org/apps) |
-| `OWNER_ID` | Tu ID numérico (opcional, `/id` en el bot) |
-
-## Build local (cualquier opción)
+## Build manual
 
 ```bash
 docker build \
@@ -34,15 +41,15 @@ docker build \
 docker run compresor-bot
 ```
 
-## Volumen persistente (opcional)
+## Volumen persistente
 
 Sin volumen los datos de usuarios/cola se pierden al reiniciar.
 
 1. Crear volumen en Koyeb → `compresor-data` de 1GB
 2. Montar en `/data`
-3. Env var: `DATA_DIR=/data`
+3. Agregar env var: `DATA_DIR=/data`
 
 ## Notas
 
-- FFmpeg con libx265 ya viene en la imagen.
-- Logs del bot → logs del servicio en Koyeb.
+- FFmpeg con libx265 ya viene instalado.
+- Logs del bot → pestaña Logs del servicio en Koyeb.
