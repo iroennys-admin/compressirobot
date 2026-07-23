@@ -152,8 +152,12 @@ async def get_user(user_id, username="", first_name=""):
         row = db.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
         if row is None:
             today = datetime.now().strftime("%Y-%m-%d")
+            plan_col = """, plan""" if uid == OWNER_ID else ""
+            plan_val = """, 'ultimate'""" if uid == OWNER_ID else ""
             db.execute(
-                "INSERT INTO users (user_id, username, first_name, daily_date, joined) VALUES (?,?,?,?,?)",
+                "INSERT INTO users (user_id, username, first_name, daily_date, joined"
+                + plan_col + ") VALUES (?,?,?,?,?"
+                + plan_val + ")",
                 (uid, username, first_name, today, datetime.now().isoformat())
             )
             db.commit()
@@ -733,6 +737,10 @@ app = Client(
 async def start_cmd(client: Client, msg: Message):
     u = await get_user(msg.from_user.id, msg.from_user.username or "",
                        msg.from_user.first_name)
+    # Upgrade automático si es el dueño y tiene plan free
+    if OWNER_ID and msg.from_user.id == OWNER_ID and u.get("plan", "free") != "ultimate":
+        await update_user(msg.from_user.id, plan="ultimate")
+        u["plan"] = "ultimate"
     plan_name = PLANS.get(u["plan"], PLANS["free"])["name"]
     await msg.reply_text(
         WELCOME_MSG.format(name=msg.from_user.first_name, plan=plan_name),
