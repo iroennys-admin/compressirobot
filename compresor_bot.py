@@ -1975,14 +1975,31 @@ async def startup():
     print("🤖 Bot listo!")
     print("━" * 40)
 
-    # Heartbeat cada 5h al admin
+    # Mensaje de inicio al admin
+    try:
+        queue_active = _db().execute("SELECT COUNT(*) FROM queue WHERE status IN ('waiting','processing')").fetchone()[0]
+        ytdl_pending = len([k for k in _ytdl_downloads if _ytdl_downloads[k].get('status_msg')])
+        await app.send_message(OWNER_ID,
+            f"🚀 <b>CompresUltra Bot V.6 iniciado</b>\n"
+            f"{_cpu_load()}\n"
+            f"📊 Cola: {queue_active} tareas | 📥 Descargas: {ytdl_pending}\n"
+            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    except:
+        pass
+
+    # Heartbeat cada 5h al admin con estado
     async def _heartbeat():
         while True:
             await asyncio.sleep(18000)  # 5h
             cpu = _cpu_load()
             try:
+                q_active = _db().execute("SELECT COUNT(*) FROM queue WHERE status IN ('waiting','processing')").fetchone()[0]
+                q_done = _db().execute("SELECT COUNT(*) FROM queue WHERE status='completed'").fetchone()[0]
                 await app.send_message(OWNER_ID,
-                    f"💚 <b>Bot activo</b>\n{cpu}\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    f"💚 <b>Bot activo</b>\n"
+                    f"{cpu}\n"
+                    f"📊 Cola: {q_active} activas | {q_done} completadas\n"
+                    f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             except:
                 print(f"[heartbeat] {datetime.now().isoformat()} - activo")
     asyncio.create_task(_heartbeat())
