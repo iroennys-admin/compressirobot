@@ -23,7 +23,7 @@ from pyrogram import Client, filters, enums, idle
 from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 )
-from pyrogram.errors import FloodWait, RPCError
+from pyrogram.errors import FloodWait, RPCError, MessageNotModified
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
@@ -438,6 +438,7 @@ async def ffmpeg_compress(
     total_frames_est = 0
     frame_pattern = re.compile(r"frame=\s*(\d+)")
     dur_pattern = re.compile(r"Duration: (\d+):(\d+):(\d+\.\d+)")
+    stderr_buf = []
 
     async def read_progress():
         nonlocal last_update, total_frames_est
@@ -447,6 +448,7 @@ async def ffmpeg_compress(
             if not chunk:
                 break
             buf += chunk
+            stderr_buf.append(chunk)
             text = buf.decode("utf-8", errors="replace")
 
             # Estimar frames totales desde la duración
@@ -483,8 +485,10 @@ async def ffmpeg_compress(
     duration = int(time.time() - start)
 
     if proc.returncode != 0:
+        err_tail = b"".join(stderr_buf[-5:]).decode("utf-8", errors="replace")[-300:]
+        err_msg = f"FFmpeg error (código {proc.returncode})\n{err_tail}" if err_tail.strip() else f"FFmpeg error (código {proc.returncode})"
         _current_proc = None
-        return False, f"FFmpeg error (código {proc.returncode})", duration
+        return False, err_msg, duration
 
     if not os.path.exists(output_path) or os.path.getsize(output_path) < 100:
         _current_proc = None
