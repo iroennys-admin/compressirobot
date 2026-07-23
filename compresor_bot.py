@@ -1063,13 +1063,18 @@ async def handle_callback(client: Client, cb: CallbackQuery):
             )
 
             try:
+                file_path = None
+                # Intentar con file_id directo (más rápido)
                 file_id = pending.get("file_id")
                 if file_id:
-                    file_path = await asyncio.wait_for(
-                        client.download_media(file_id, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4")),
-                        timeout=120
-                    )
-                else:
+                    try:
+                        file_path = await asyncio.wait_for(
+                            client.download_media(file_id, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4")),
+                            timeout=120
+                        )
+                    except: pass
+                # Si falló, intentar vía get_messages (más confiable)
+                if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) < 1024:
                     orig = await asyncio.wait_for(
                         client.get_messages(pending["chat_id"], pending["msg_id"]), timeout=30
                     )
@@ -1077,6 +1082,8 @@ async def handle_callback(client: Client, cb: CallbackQuery):
                         client.download_media(orig, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4")),
                         timeout=120
                     )
+                if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) < 1024:
+                    raise Exception("Archivo descargado corrupto o vacío")
             except asyncio.TimeoutError:
                 _pending_videos.pop(user_id, None)
                 await cb.message.edit_text("❌ <b>Error al descargar:</b> Tiempo agotado (>120s).")
