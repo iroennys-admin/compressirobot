@@ -24,6 +24,7 @@ from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 )
 from pyrogram.errors import FloodWait, RPCError, MessageNotModified
+from yt_dlp import YoutubeDL, DownloadError
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
@@ -281,18 +282,23 @@ WELCOME_MSG = """👋 ¡Hola, {name}!
 🤖 Bienvenido a <b>CompresUltra Bot V.6</b>
 ━━━━━━━━━━━━━━━━━━━━━
 🗜️ <b>Comprimo tus videos con la mejor calidad</b>
-⚡ Motor: FFmpeg + libx265
+📥 <b>Descargo de YouTube y sitios web</b>
+⚡ FFmpeg + libx265 | yt-dlp
 ━━━━━━━━━━━━━━━━━━━━━
 📋 Tu plan: {plan}
 🌐 Modo: Público
 ━━━━━━━━━━━━━━━━━━━━━
 
-📌 <b>Envía un video como documento o directo para comprimirlo.</b>
-
-<i>Usa los botones de abajo para navegar</i> 👇"""
+📌 <b>Enviá un video para comprimirlo</b>
+🔗 <b>/yt &lt;url&gt;</b> — Descargar desde YouTube
+🔗 <b>/mirror &lt;url&gt;</b> — Descargar desde cualquier link"""
 
 HELP_MSG = """📖 <b>CompresUltra Bot — Comandos</b>
 ━━━━━━━━━━━━━━━━━━━━━
+
+📥 <b>Descargas:</b>
+/yt &lt;url&gt; — 🎬 Descargar de YouTube con calidad
+/mirror &lt;url&gt; — 📥 Descargar archivo desde cualquier link
 
 👤 <b>Usuario:</b>
 /start — 👋 Bienvenida con menú
@@ -311,17 +317,17 @@ HELP_MSG = """📖 <b>CompresUltra Bot — Comandos</b>
 /velocidad — ⚡ Test de velocidad
 
 ━━━━━━━━━━━━━━━━━━━━━
-📌 <i>Envía cualquier video para comprimirlo automáticamente.</i>"""
+📌 <i>Envíá cualquier video para comprimirlo automáticamente.</i>"""
 
 ABOUT_MSG = """ℹ️ <b>CompresUltra Bot V.6</b>
 ━━━━━━━━━━━━━━━━━━━━━
 🗜️ Bot de compresión de videos
-⚡ FFmpeg + libx265
-👨‍💻 Desarrollador: {admin}
+📥 Mirror & Descarga desde YouTube
+⚡ FFmpeg + libx265 | yt-dlp
+👨‍💻 Creado por @nautaii
 📅 Versión: 6.0
 ━━━━━━━━━━━━━━━━━━━━━
-<i>Comprime tus videos sin perder calidad
-y ahorra espacio en Telegram.</i>"""
+<i>Comprime, descarga y comparte sin límites</i>"""
 
 # ═══════════════════════════════════════════════════════════════
 # UTILIDADES
@@ -1525,6 +1531,304 @@ async def show_queue(msg_or_cb, edit=False):
 
 
 # ═══════════════════════════════════════════════════════════════
+# YT-DLP DOWNLOADER
+# ═══════════════════════════════════════════════════════════════
+
+_ytdl_format_timeout = 120
+_ytdl_downloads = {}  # {user_id: {url, status_msg, reply_to}}
+
+YTDL_OPTS = {
+    "cookiefile": str(DATA_DIR / "cookies.txt"),
+    "noprogress": True,
+    "overwrites": True,
+    "retries": 5,
+    "fragment_retries": 5,
+    "trim_file_name": 200,
+    "quiet": True,
+    "no_warnings": True,
+}
+
+
+def _cpu_load():
+    """Devuelve uso de CPU como string tipo 🔲 25%"""
+    try:
+        avg = open("/proc/loadavg").read().split()
+        one_min = float(avg[0])
+        cores = os.cpu_count() or 1
+        pct = min(int(one_min / cores * 100), 100)
+        bar = "🟢" if pct < 50 else ("🟡" if pct < 80 else "🔴")
+        return f"{bar} CPU: {pct}%"
+    except:
+        return ""
+
+
+def _ytdl_extract(url):
+    with YoutubeDL({**YTDL_OPTS, "playlist_items": "1"}) as ydl:
+        return ydl.extract_info(url, download=False)
+
+
+def _ytdl_download(url, dest, fmt, progress_hook):
+    opts = {**YTDL_OPTS, "format": fmt, "outtmpl": dest, "progress_hooks": [progress_hook]}
+    with YoutubeDL(opts) as ydl:
+        ydl.download([url])
+
+
+async def _send_ytdl_file(client, chat_id, file_path, caption="", reply_to=0):
+    """Sube un archivo a Telegram con barra de progreso + CPU."""
+    ul_last = [0.0]
+    async def ul_prog(cur, tot):
+        t = time.time()
+        if t - ul_last[0] < 2 and cur != tot: return
+        ul_last[0] = t
+        pct = cur / tot * 100 if tot else 0
+        speed = human_size(cur / (t - ul_last[0] + 0.01)) + "/s" if t - ul_last[0] > 0 else "?"
+        cpu = _cpu_load()
+        try:
+            await client.edit_message_text(
+                chat_id, _ytdl_downloads.get(chat_id, {}).get("status_msg", 0),
+                f"📤 <b>Subiendo a Telegram</b>\n"
+                f"┣ {_progress_bar(pct)} {pct:.1f}%\n"
+                f"┣ 📦 {human_size(cur)} / {human_size(tot)}\n"
+                f"┣ ⚡ {speed}\n"
+                f"└ {cpu}"
+            )
+        except: pass
+
+    await client.send_document(
+        chat_id, file_path, caption=caption,
+        reply_to_message_id=reply_to or None,
+        progress=ul_prog
+    )
+
+
+YT_FORMATS = [
+    ("🎬 Mejor video", "bv*+ba/b"),
+    (" 2160p (4K)", "bv*[height<=?2160]+ba/b"),
+    (" 1080p (Full HD)", "bv*[height<=?1080]+ba/b"),
+    (" 720p (HD)", "bv*[height<=?720]+ba/b"),
+    (" 480p", "bv*[height<=?480]+ba/b"),
+    (" 360p", "bv*[height<=?360]+ba/b"),
+    ("🎵 Mejor audio (mp3)", "ba/b-mp3-128"),
+    ("🎵 Solo audio (opus)", "ba/b"),
+]
+
+
+@app.on_callback_query(filters.regex(r"^ytfmt:") & ~filters.me)
+async def _ytfmt_cb(client: Client, cb: CallbackQuery):
+    uid = cb.from_user.id
+    fmt = cb.data.split(":", 1)[1]
+    entry = _ytdl_downloads.get(uid)
+    if not entry:
+        return await cb.answer("❌ Sesión expirada. Enviá el link de nuevo.", show_alert=True)
+
+    await cb.message.edit_text(f"📥 <b>Iniciando descarga...</b>\n{_cpu_load()}")
+
+    dest = str(DATA_DIR / "downloads" / f"ytdl_{uid}_{int(time.time())}.%(ext)s")
+    progress = {"last": 0, "msg": cb.message, "loop": asyncio.get_running_loop()}
+
+    def hook(d):
+        if d["status"] == "downloading":
+            t = time.time()
+            if t - progress["last"] < 2: return
+            progress["last"] = t
+            pct = d.get("_percent_str", "0%").strip("%")
+            speed = d.get("_speed_str", "?")
+            eta = d.get("_eta_str", "?")
+            total = human_size(d.get("total_bytes", d.get("total_bytes_estimate", 0)))
+            cpu = _cpu_load()
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    progress["msg"].edit_text(
+                        f"📥 <b>Descargando</b>\n"
+                        f"┣ {_progress_bar(float(pct))} {pct}%\n"
+                        f"┣ 📦 {total}\n"
+                        f"┣ ⚡ {speed}\n"
+                        f"┣ ⏱️ {eta}\n"
+                        f"└ {cpu}"
+                    ), progress["loop"]
+                )
+            except: pass
+
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(
+            None, lambda: _ytdl_download(entry["url"], dest, fmt, hook)
+        )
+        # Encontrar el archivo descargado
+        out_dir = DATA_DIR / "downloads"
+        files = sorted(out_dir.glob(f"ytdl_{uid}_*"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        file_path = files[0] if files else None
+    except Exception as e:
+        await cb.message.edit_text(f"❌ <b>Error al descargar:</b> {e}")
+        _ytdl_downloads.pop(uid, None)
+        return
+
+    if not file_path or not file_path.exists():
+        await cb.message.edit_text("❌ No se pudo descargar el archivo.")
+        _ytdl_downloads.pop(uid, None)
+        return
+
+    # Subir a Telegram
+    caption = f"⬇️ <b>Descargado vía CompresUltra</b>\n🔗 {entry['url']}"
+    try:
+        await _send_ytdl_file(client, uid, str(file_path), caption, entry.get("reply_to"))
+        await cb.message.edit_text(f"✅ <b>Descarga completada ✓</b>\n📁 {file_path.name}")
+    except Exception as e:
+        await cb.message.edit_text(f"❌ <b>Error al enviar:</b> {e}")
+    finally:
+        file_path.unlink(missing_ok=True)
+        _ytdl_downloads.pop(uid, None)
+
+
+# ── /yt — Descargar de YouTube ──
+
+@app.on_message(filters.command("yt", prefixes=["/", ".", "!"]))
+async def yt_cmd(client: Client, msg: Message):
+    if len(msg.text.split()) < 2:
+        return await msg.reply_text(
+            "❌ Usá: <code>/yt &lt;url&gt;</code>\n"
+            "Ej: <code>/yt https://youtube.com/watch?v=...</code>"
+        )
+
+    url = msg.text.split(None, 1)[1].strip()
+
+    try:
+        await msg.react(emoji="👍")
+    except: pass
+
+    status = await msg.reply_text(f"🔍 <b>Analizando video...</b>")
+
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: _ytdl_extract(url)
+        )
+    except Exception as e:
+        return await status.edit_text(f"❌ <b>Error al analizar:</b> {str(e)[:200]}")
+
+    if not result or result.get("is_live"):
+        return await status.edit_text("❌ Video no disponible o es un live.")
+
+    title = result.get("title", "Sin título")[:50]
+    duration = result.get("duration", 0)
+    dur_str = f"{duration//60}:{duration%60:02d}" if duration else "?"
+    uploader = result.get("uploader", "?")[:30]
+
+    _ytdl_downloads[msg.from_user.id] = {
+        "url": url, "status_msg": status.id, "reply_to": msg.id
+    }
+
+    buttons = [
+        [InlineKeyboardButton(label, callback_data=f"ytfmt:{fmt}")]
+        for label, fmt in YT_FORMATS
+    ]
+    buttons.append([InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")])
+
+    await status.edit_text(
+        f"📹 <b>{title}</b>\n"
+        f"👤 {uploader} | ⏱️ {dur_str}\n"
+        f"\n"
+        f"<b>Seleccioná calidad:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+# ── /mirror — Descargar desde cualquier link directo (usa yt-dlp) ──
+
+@app.on_message(filters.command("mirror", prefixes=["/", ".", "!"]))
+async def mirror_cmd(client: Client, msg: Message):
+    if len(msg.text.split()) < 2:
+        return await msg.reply_text(
+            "❌ Usá: <code>/mirror &lt;url&gt;</code>\n"
+            "Ej: <code>/mirror https://ejemplo.com/video.mp4</code>"
+        )
+
+    url = msg.text.split(None, 1)[1].strip()
+
+    try:
+        await msg.react(emoji="⬇️")
+    except: pass
+
+    status = await msg.reply_text(f"⬇️ <b>Preparando descarga...</b>")
+
+    loop = asyncio.get_running_loop()
+    dest = str(DATA_DIR / "downloads" / f"mirror_{msg.from_user.id}_{int(time.time())}.%(ext)s")
+    progress = {"last": 0, "msg": status, "loop": loop}
+
+    def hook(d):
+        if d["status"] == "downloading":
+            t = time.time()
+            if t - progress["last"] < 2: return
+            progress["last"] = t
+            pct = d.get("_percent_str", "0%").strip("%")
+            speed = d.get("_speed_str", "?")
+            eta = d.get("_eta_str", "?")
+            total = human_size(d.get("total_bytes", d.get("total_bytes_estimate", 0)))
+            cpu = _cpu_load()
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    progress["msg"].edit_text(
+                        f"📥 <b>Descargando</b>\n"
+                        f"┣ {_progress_bar(float(pct))} {pct}%\n"
+                        f"┣ 📦 {total}\n"
+                        f"┣ ⚡ {speed}\n"
+                        f"┣ ⏱️ {eta}\n"
+                        f"└ {cpu}"
+                    ), progress["loop"]
+                )
+            except: pass
+
+    try:
+        await loop.run_in_executor(
+            None, lambda: _ytdl_download(url, dest, "best", hook)
+        )
+        out_dir = DATA_DIR / "downloads"
+        files = sorted(out_dir.glob(f"mirror_{msg.from_user.id}_*"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        file_path = files[0] if files else None
+    except Exception as e:
+        return await status.edit_text(f"❌ <b>Error al descargar:</b> {e}")
+
+    if not file_path or not file_path.exists():
+        return await status.edit_text("❌ No se pudo descargar el archivo.")
+
+    # Subir a Telegram
+    ul_last = [0.0]
+    try:
+        await msg.react(emoji="📤")
+    except: pass
+    async def ul_prog(cur, tot):
+        t = time.time()
+        if t - ul_last[0] < 2 and cur != tot: return
+        ul_last[0] = t
+        pct = cur / tot * 100 if tot else 0
+        speed = human_size(cur / (t - ul_last[0] + 0.01)) + "/s" if t - ul_last[0] > 0 else "?"
+        cpu = _cpu_load()
+        try:
+            await client.edit_message_text(
+                msg.chat.id, status.id,
+                f"📤 <b>Subiendo a Telegram</b>\n"
+                f"┣ {_progress_bar(pct)} {pct:.1f}%\n"
+                f"┣ 📦 {human_size(cur)} / {human_size(tot)}\n"
+                f"┣ ⚡ {speed}\n"
+                f"└ {cpu}"
+            )
+        except: pass
+
+    try:
+        await client.send_document(
+            msg.chat.id, str(file_path), caption=f"⬇️ <b>Descargado</b>\n🔗 {url}",
+            reply_to_message_id=msg.id,
+            progress=ul_prog
+        )
+        await status.edit_text(f"✅ <b>Descarga completada ✓</b>\n📁 {file_path.name}")
+    except Exception as e:
+        await status.edit_text(f"❌ <b>Error al enviar:</b> {e}")
+    finally:
+        file_path.unlink(missing_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 
@@ -1569,6 +1873,8 @@ async def startup():
         await app.set_bot_commands([
             BotCommand("start", "👋 Bienvenida"),
             BotCommand("help", "📖 Comandos disponibles"),
+            BotCommand("yt", "🎬 Descargar de YouTube"),
+            BotCommand("mirror", "📥 Descargar desde URL"),
             BotCommand("miperfil", "👤 Tu perfil y estadísticas"),
             BotCommand("miplan", "📋 Tu plan actual"),
             BotCommand("planes", "📊 Ver planes disponibles"),
@@ -1586,6 +1892,18 @@ async def startup():
 
     print("🤖 Bot listo!")
     print("━" * 40)
+
+    # Heartbeat cada 5h al admin
+    async def _heartbeat():
+        while True:
+            await asyncio.sleep(18000)  # 5h
+            cpu = _cpu_load()
+            try:
+                await app.send_message(OWNER_ID,
+                    f"💚 <b>Bot activo</b>\n{cpu}\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            except:
+                print(f"[heartbeat] {datetime.now().isoformat()} - activo")
+    asyncio.create_task(_heartbeat())
 
 
 async def main():
