@@ -1563,8 +1563,14 @@ def _cpu_load():
 
 
 def _ytdl_extract(url):
-    with YoutubeDL({**YTDL_OPTS, "playlist_items": "1"}) as ydl:
-        return ydl.extract_info(url, download=False)
+    """Extrae info del video/playlist. Detecta playlist automáticamente."""
+    opts = {**YTDL_OPTS}
+    with YoutubeDL({**opts, "playlist_items": "1:10"}) as ydl:
+        result = ydl.extract_info(url, download=False)
+        if result is None:
+            raise ValueError("Info result is None")
+        is_playlist = "entries" in result
+        return result, is_playlist
 
 
 def _ytdl_download(url, dest, fmt, progress_hook):
@@ -1573,7 +1579,7 @@ def _ytdl_download(url, dest, fmt, progress_hook):
         ydl.download([url])
 
 
-async def _send_ytdl_file(client, chat_id, file_path, caption="", reply_to=0):
+async def _send_ytdl_file(client, chat_id, file_path, caption="", reply_to=0, status_msg_id=0):
     """Sube un archivo a Telegram con barra de progreso + CPU."""
     ul_last = [0.0]
     async def ul_prog(cur, tot):
@@ -1584,8 +1590,9 @@ async def _send_ytdl_file(client, chat_id, file_path, caption="", reply_to=0):
         speed = human_size(cur / (t - ul_last[0] + 0.01)) + "/s" if t - ul_last[0] > 0 else "?"
         cpu = _cpu_load()
         try:
+            smid = status_msg_id or _ytdl_downloads.get(chat_id, {}).get("status_msg", 0)
             await client.edit_message_text(
-                chat_id, _ytdl_downloads.get(chat_id, {}).get("status_msg", 0),
+                chat_id, smid,
                 f"📤 <b>Subiendo a Telegram</b>\n"
                 f"┣ {_progress_bar(pct)} {pct:.1f}%\n"
                 f"┣ 📦 {human_size(cur)} / {human_size(tot)}\n"
@@ -1654,31 +1661,37 @@ async def _ytfmt_cb(client: Client, cb: CallbackQuery):
         await loop.run_in_executor(
             None, lambda: _ytdl_download(entry["url"], dest, fmt, hook)
         )
-        # Encontrar el archivo descargado
-        out_dir = DATA_DIR / "downloads"
-        files = sorted(out_dir.glob(f"ytdl_{uid}_*"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
-        file_path = files[0] if files else None
+        # Encontrar archivos descargados (soporta playlists)
+        prefix = f"ytdl_{uid}_"
+        files = sorted(
+            (p for p in (DATA_DIR / "downloads").iterdir() if p.name.startswith(prefix)),
+            key=lambda p: p.stat().st_mtime
+        )
     except Exception as e:
         await cb.message.edit_text(f"❌ <b>Error al descargar:</b> {e}")
         _ytdl_downloads.pop(uid, None)
         return
 
-    if not file_path or not file_path.exists():
+    if not files:
         await cb.message.edit_text("❌ No se pudo descargar el archivo.")
         _ytdl_downloads.pop(uid, None)
         return
 
-    # Subir a Telegram
-    caption = f"⬇️ <b>Descargado vía CompresUltra</b>\n🔗 {entry['url']}"
-    try:
-        await _send_ytdl_file(client, uid, str(file_path), caption, entry.get("reply_to"))
-        await cb.message.edit_text(f"✅ <b>Descarga completada ✓</b>\n📁 {file_path.name}")
-    except Exception as e:
-        await cb.message.edit_text(f"❌ <b>Error al enviar:</b> {e}")
-    finally:
-        file_path.unlink(missing_ok=True)
-        _ytdl_downloads.pop(uid, None)
+    await cb.message.edit_text(f"⬆️ <b>Subiendo {len(files)} archivo(s)...</b>")
+
+    for i, file_path in enumerate(files):
+        caption = f"⬇️ <b>Descargado vía CompresUltra</b>\n🔗 {entry['url']}"
+        if len(files) > 1:
+            caption = f"{caption}\n📦 {i+1}/{len(files)}"
+        try:
+            await _send_ytdl_file(client, uid, str(file_path), caption, entry.get("reply_to"), entry.get("status_msg"))
+        except Exception as e:
+            await cb.message.edit_text(f"❌ <b>Error al enviar ({i+1}/{len(files)}):</b> {e}")
+        finally:
+            file_path.unlink(missing_ok=True)
+
+    await cb.message.edit_text(f"✅ <b>Descarga completada ✓</b>\n📁 {len(files)} archivo(s)")
+    _ytdl_downloads.pop(uid, None)
 
 
 # ── /yt — Descargar de YouTube ──
@@ -1700,7 +1713,7 @@ async def yt_cmd(client: Client, msg: Message):
     status = await msg.reply_text(f"🔍 <b>Analizando video...</b>")
 
     try:
-        result = await asyncio.get_running_loop().run_in_executor(
+        result, is_playlist = await asyncio.get_running_loop().run_in_executor(
             None, lambda: _ytdl_extract(url)
         )
     except Exception as e:
@@ -1713,27 +1726,115 @@ async def yt_cmd(client: Client, msg: Message):
     duration = result.get("duration", 0)
     dur_str = f"{duration//60}:{duration%60:02d}" if duration else "?"
     uploader = result.get("uploader", "?")[:30]
+    entries = result.get("entries")
+    playlist_count = len(entries) if entries else 0
 
     _ytdl_downloads[msg.from_user.id] = {
         "url": url, "status_msg": status.id, "reply_to": msg.id
     }
 
-    buttons = [
-        [InlineKeyboardButton(label, callback_data=f"ytfmt:{fmt}")]
-        for label, fmt in YT_FORMATS
-    ]
-    buttons.append([InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")])
+    # Si es playlist, mostrar opciones de playlist
+    if is_playlist and playlist_count > 1:
+        buttons = [
+            [InlineKeyboardButton(f"📋 Playlist ({playlist_count} videos) — Mejor calidad", callback_data=f"ytfmt:bv*+ba/b")],
+            [InlineKeyboardButton(f"📋 Playlist — 720p", callback_data=f"ytfmt:bv*[height<=?720]+ba/b")],
+            [InlineKeyboardButton("🎵 Solo audio (mp3)", callback_data="ytfmt:ba/b-mp3-128")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")],
+        ]
+        header = f"📋 <b>{title}</b>\n🎵 {playlist_count} videos | 👤 {uploader}\n\n"
+    else:
+        buttons = [
+            [InlineKeyboardButton(label, callback_data=f"ytfmt:{fmt}")]
+            for label, fmt in YT_FORMATS
+        ]
+        buttons.append([InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")])
+        header = f"📹 <b>{title}</b>\n👤 {uploader} | ⏱️ {dur_str}\n\n"
 
     await status.edit_text(
-        f"📹 <b>{title}</b>\n"
-        f"👤 {uploader} | ⏱️ {dur_str}\n"
-        f"\n"
-        f"<b>Seleccioná calidad:</b>",
+        f"{header}<b>Seleccioná calidad:</b>",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
 # ── /mirror — Descargar desde cualquier link directo (usa yt-dlp) ──
+
+_RE_URL = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+_RE_VIDEO_SITES = re.compile(
+    r"(youtube\.com|youtu\.be|instagram\.com|twitter\.com|x\.com|tiktok\.com|facebook\.com|fb\.watch|reddit\.com|t\.co|pinterest\.com|twitch\.tv|dailymotion\.com|vimeo\.com)",
+    re.IGNORECASE
+)
+
+@app.on_message(filters.text)
+async def _auto_detect_url(client: Client, msg: Message):
+    """Detecta enlaces de video automáticamente."""
+    if not msg.text or msg.text.startswith("/"):
+        return
+    urls = _RE_URL.findall(msg.text.strip())
+    if not urls:
+        return
+    url = urls[0]
+    if not _RE_VIDEO_SITES.search(url):
+        return
+    # Si es un comando directo, no intervenir
+    if msg.text.startswith("/"):
+        return
+
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Descargar video", callback_data=f"ytdl_auto:{url}")],
+        [InlineKeyboardButton("❌ Ignorar", callback_data="del")]
+    ])
+    await msg.reply_text(
+        f"🔗 <b>Enlace detectado</b>\n📎 {url[:60]}...\n\n¿Querés descargarlo?",
+        reply_markup=buttons,
+        reply_to_message_id=msg.id
+    )
+
+
+@app.on_callback_query(filters.regex(r"^ytdl_auto:") & ~filters.me)
+async def _ytdl_auto_cb(client: Client, cb: CallbackQuery):
+    url = cb.data.split(":", 1)[1]
+    uid = cb.from_user.id
+
+    await cb.message.edit_text(f"🔍 <b>Analizando enlace...</b>")
+    try:
+        result, is_playlist = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: _ytdl_extract(url)
+        )
+    except Exception as e:
+        return await cb.message.edit_text(f"❌ <b>Error:</b> {str(e)[:200]}")
+
+    if not result or result.get("is_live"):
+        return await cb.message.edit_text("❌ No disponible o es un live.")
+
+    title = result.get("title", "Sin título")[:50]
+    uploader = result.get("uploader", result.get("channel", "?"))[:30]
+    dur = result.get("duration", 0)
+    dur_str = f"{dur//60}:{dur%60:02d}" if dur else "?"
+    entries = result.get("entries")
+    playlist_count = len(entries) if entries else 0
+
+    _ytdl_downloads[uid] = {"url": url, "status_msg": cb.message.id, "reply_to": 0}
+
+    if is_playlist and playlist_count > 1:
+        buttons = [
+            [InlineKeyboardButton(f"📋 Playlist ({playlist_count} videos) — Mejor calidad", callback_data=f"ytfmt:bv*+ba/b")],
+            [InlineKeyboardButton(f"📋 Playlist — 720p", callback_data=f"ytfmt:bv*[height<=?720]+ba/b")],
+            [InlineKeyboardButton("🎵 Solo audio (mp3)", callback_data="ytfmt:ba/b-mp3-128")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")],
+        ]
+        header = f"📋 <b>{title}</b>\n🎵 {playlist_count} videos | 👤 {uploader}\n\n"
+    else:
+        buttons = [
+            [InlineKeyboardButton(label, callback_data=f"ytfmt:{fmt}")]
+            for label, fmt in YT_FORMATS
+        ]
+        buttons.append([InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")])
+        header = f"📹 <b>{title}</b>\n👤 {uploader} | ⏱️ {dur_str}\n\n"
+
+    await cb.message.edit_text(
+        f"{header}<b>Seleccioná calidad:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 @app.on_message(filters.command("mirror", prefixes=["/", ".", "!"]))
 async def mirror_cmd(client: Client, msg: Message):
@@ -1782,50 +1883,31 @@ async def mirror_cmd(client: Client, msg: Message):
         await loop.run_in_executor(
             None, lambda: _ytdl_download(url, dest, "best", hook)
         )
-        out_dir = DATA_DIR / "downloads"
-        files = sorted(out_dir.glob(f"mirror_{msg.from_user.id}_*"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
-        file_path = files[0] if files else None
+        prefix = f"mirror_{msg.from_user.id}_"
+        files = sorted(
+            (p for p in (DATA_DIR / "downloads").iterdir() if p.name.startswith(prefix)),
+            key=lambda p: p.stat().st_mtime
+        )
     except Exception as e:
         return await status.edit_text(f"❌ <b>Error al descargar:</b> {e}")
 
-    if not file_path or not file_path.exists():
+    if not files:
         return await status.edit_text("❌ No se pudo descargar el archivo.")
 
-    # Subir a Telegram
-    ul_last = [0.0]
-    try:
-        await msg.react(emoji="📤")
-    except: pass
-    async def ul_prog(cur, tot):
-        t = time.time()
-        if t - ul_last[0] < 2 and cur != tot: return
-        ul_last[0] = t
-        pct = cur / tot * 100 if tot else 0
-        speed = human_size(cur / (t - ul_last[0] + 0.01)) + "/s" if t - ul_last[0] > 0 else "?"
-        cpu = _cpu_load()
-        try:
-            await client.edit_message_text(
-                msg.chat.id, status.id,
-                f"📤 <b>Subiendo a Telegram</b>\n"
-                f"┣ {_progress_bar(pct)} {pct:.1f}%\n"
-                f"┣ 📦 {human_size(cur)} / {human_size(tot)}\n"
-                f"┣ ⚡ {speed}\n"
-                f"└ {cpu}"
-            )
-        except: pass
+    await status.edit_text(f"⬆️ <b>Subiendo {len(files)} archivo(s)...</b>")
 
-    try:
-        await client.send_document(
-            msg.chat.id, str(file_path), caption=f"⬇️ <b>Descargado</b>\n🔗 {url}",
-            reply_to_message_id=msg.id,
-            progress=ul_prog
-        )
-        await status.edit_text(f"✅ <b>Descarga completada ✓</b>\n📁 {file_path.name}")
-    except Exception as e:
-        await status.edit_text(f"❌ <b>Error al enviar:</b> {e}")
-    finally:
-        file_path.unlink(missing_ok=True)
+    for i, file_path in enumerate(files):
+        caption = f"⬇️ <b>Descargado vía CompresUltra</b>\n🔗 {url}"
+        if len(files) > 1:
+            caption = f"{caption}\n📦 {i+1}/{len(files)}"
+        try:
+            await _send_ytdl_file(client, msg.chat.id, str(file_path), caption, msg.id, status.id)
+        except Exception as e:
+            await status.edit_text(f"❌ <b>Error al enviar ({i+1}/{len(files)}):</b> {e}")
+        finally:
+            file_path.unlink(missing_ok=True)
+
+    await status.edit_text(f"✅ <b>Descarga completada ✓</b>\n📁 {len(files)} archivo(s)")
 
 
 # ═══════════════════════════════════════════════════════════════
