@@ -18,3 +18,5 @@ __pycache__/
 # Local dev
 .atl/
 start_compresor.sh
+compresor_data/*.db-shm
+compresor_data/*.db-wal
