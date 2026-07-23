@@ -1270,6 +1270,8 @@ async def handle_callback(client: Client, cb: CallbackQuery):
         else:
             await cb.answer("Acción no disponible", show_alert=True)
 
+    except MessageNotModified:
+        pass
     except Exception as e:
         print(f"[Callback Error] {data}: {traceback.format_exc()}")
         try:
@@ -1519,6 +1521,11 @@ async def startup():
 
 
 async def main():
+    # Health check mínimo para Koyeb
+    async def health_check():
+        server = await asyncio.start_server(lambda r, w: (r.close(), w.close()), "0.0.0.0", 8000)
+        await server.serve_forever()
+    asyncio.create_task(health_check())
     await startup()
     await idle()
 
