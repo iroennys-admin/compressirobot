@@ -1003,10 +1003,12 @@ async def handle_video(client: Client, msg: Message):
         )
         return
 
-    # Guardar pending y mostrar selección de modo
+    # Guardar file_id y mostrar selección de modo
+    file_id = file_info.file_id if hasattr(file_info, 'file_id') else None
     _pending_videos[user_id] = {
         "msg_id": msg.id, "chat_id": msg.chat.id,
         "file_size": file_size, "username": msg.from_user.username or "",
+        "file_id": file_id,
     }
 
     rows = [[InlineKeyboardButton(m["label"], callback_data=f"cmode:{k}")] for k, m in COMPRESSION_MODES.items()]
@@ -1061,8 +1063,24 @@ async def handle_callback(client: Client, cb: CallbackQuery):
             )
 
             try:
-                orig = await client.get_messages(pending["chat_id"], pending["msg_id"])
-                file_path = await client.download_media(orig, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4"))
+                file_id = pending.get("file_id")
+                if file_id:
+                    file_path = await asyncio.wait_for(
+                        client.download_media(file_id, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4")),
+                        timeout=120
+                    )
+                else:
+                    orig = await asyncio.wait_for(
+                        client.get_messages(pending["chat_id"], pending["msg_id"]), timeout=30
+                    )
+                    file_path = await asyncio.wait_for(
+                        client.download_media(orig, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4")),
+                        timeout=120
+                    )
+            except asyncio.TimeoutError:
+                _pending_videos.pop(user_id, None)
+                await cb.message.edit_text("❌ <b>Error al descargar:</b> Tiempo agotado (>120s).")
+                return
             except Exception as e:
                 _pending_videos.pop(user_id, None)
                 await cb.message.edit_text(f"❌ <b>Error al descargar:</b> {e}")
