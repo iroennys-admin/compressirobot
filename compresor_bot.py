@@ -679,17 +679,36 @@ async def queue_worker(client: Client):
                         f"⚙️ Calidad: {QUALITY_PRESETS[quality_key]['label']}\n"
                         f"⚡ Tiempo: {human_time(int(dur))}"
                     )
+                    smid = job.get("status_msg_id")
+                    ul_last = [0.0]
+                    async def ul_prog(cur, tot):
+                        t = time.time()
+                        if t - ul_last[0] < 2 and cur != tot: return
+                        ul_last[0] = t
+                        pct = cur / tot * 100 if tot else 0
+                        try:
+                            await client.edit_message_text(
+                                chat_id, smid,
+                                f"📤 <b>Subiendo archivo...</b>\n"
+                                f"📏 {human_size(original_size)} → {human_size(compressed_size)} ({ratio:.1f}% menos)\n"
+                                f"📤 {_progress_bar(pct)} {pct:.1f}%"
+                            )
+                        except: pass
                     await client.send_document(
                         chat_id, output_path, caption=caption,
-                        reply_to_message_id=msg_id
+                        reply_to_message_id=msg_id,
+                        progress=ul_prog
                     )
 
                     # Actualizar mensaje de estado
-                    await client.edit_message_text(
-                        chat_id, job.get("status_msg_id", 0),
+                    final_msg = (
                         f"✅ <b>Compresión completada ✓</b>\n"
                         f"📏 {human_size(original_size)} → {human_size(compressed_size)} ({ratio:.1f}% menos)\n"
                         f"⚡ Tiempo: {human_time(int(dur))}"
+                    )
+                    await client.edit_message_text(
+                        chat_id, smid,
+                        final_msg
                     )
                 except RPCError as e:
                     await client.edit_message_text(
@@ -1072,22 +1091,34 @@ async def handle_callback(client: Client, cb: CallbackQuery):
 
             try:
                 file_path = None
-                # Intentar con file_id directo (más rápido)
+                # Progreso de descarga (throttle ~2s)
+                dl_last = [0.0]
+                async def dl_prog(cur, tot):
+                    t = time.time()
+                    if t - dl_last[0] < 2 and cur != tot: return
+                    dl_last[0] = t
+                    pct = cur / tot * 100 if tot else 0
+                    try:
+                        await cb.message.edit_text(
+                            f"⬇️ <b>Descargando video...</b>\n📏 Tamaño: {human_size(pending['file_size'])}\n"
+                            f"🎛️ {COMPRESSION_MODES[mode_key]['label']} | {QUALITY_PRESETS[quality_key]['label']}\n"
+                            f"📥 {_progress_bar(pct)} {pct:.1f}%"
+                        )
+                    except MessageNotModified: pass
                 file_id = pending.get("file_id")
                 if file_id:
                     try:
                         file_path = await asyncio.wait_for(
-                            client.download_media(file_id, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4")),
+                            client.download_media(file_id, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4"), progress=dl_prog),
                             timeout=120
                         )
                     except: pass
-                # Si falló, intentar vía get_messages (más confiable)
                 if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) < 1024:
                     orig = await asyncio.wait_for(
                         client.get_messages(pending["chat_id"], pending["msg_id"]), timeout=30
                     )
                     file_path = await asyncio.wait_for(
-                        client.download_media(orig, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4")),
+                        client.download_media(orig, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4"), progress=dl_prog),
                         timeout=120
                     )
                 if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) < 1024:
