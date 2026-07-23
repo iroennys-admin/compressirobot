@@ -1523,7 +1523,7 @@ async def startup():
 async def main():
     # Health check mínimo para Koyeb
     async def health_check():
-        server = await asyncio.start_server(lambda r, w: (r.close(), w.close()), "0.0.0.0", 8000)
+        server = await asyncio.start_server(lambda r, w: w.close(), "0.0.0.0", 8000)
         await server.serve_forever()
     asyncio.create_task(health_check())
     await startup()
