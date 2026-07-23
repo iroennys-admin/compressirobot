@@ -1563,14 +1563,45 @@ def _cpu_load():
 
 
 def _ytdl_extract(url):
-    """Extrae info del video/playlist. Detecta playlist automáticamente."""
+    """Extrae info del video/playlist. Devuelve (result, is_playlist, format_map)."""
     opts = {**YTDL_OPTS}
     with YoutubeDL({**opts, "playlist_items": "1:10"}) as ydl:
         result = ydl.extract_info(url, download=False)
         if result is None:
             raise ValueError("Info result is None")
         is_playlist = "entries" in result
-        return result, is_playlist
+        # Construir mapa de formatos como el mirror-leech
+        fmt_map = {}
+        if not is_playlist and result.get("formats"):
+            has_m4a = any(f.get("audio_ext") == "m4a" for f in result["formats"])
+            for item in result["formats"]:
+                if not item.get("tbr"):
+                    continue
+                fmt_id = item["format_id"]
+                if item.get("filesize"):
+                    size = item["filesize"]
+                elif item.get("filesize_approx"):
+                    size = item["filesize_approx"]
+                else:
+                    size = 0
+                # Solo audio
+                if item.get("video_ext") == "none" and (
+                    item.get("resolution") == "audio only" or item.get("acodec") != "none"
+                ):
+                    b_name = f"🎵 {item.get('acodec') or fmt_id}-{item['ext']}"
+                    v_fmt = fmt_id
+                # Video con altura
+                elif item.get("height"):
+                    h = item["height"]
+                    ext = item["ext"]
+                    fps = item.get("fps", "")
+                    b_name = f"🎬 {h}p{f' {fps}fps' if fps else ''}-{ext}"
+                    ba_ext = "[ext=m4a]" if has_m4a and ext == "mp4" else ""
+                    v_fmt = f"{fmt_id}+ba{ba_ext}/b[height=?{h}]"
+                else:
+                    continue
+                fmt_map.setdefault(b_name, {})[f"{item['tbr']}"] = [size, v_fmt]
+        return result, is_playlist, fmt_map
 
 
 def _ytdl_download(url, dest, fmt, progress_hook):
@@ -1608,25 +1639,75 @@ async def _send_ytdl_file(client, chat_id, file_path, caption="", reply_to=0, st
     )
 
 
-YT_FORMATS = [
-    ("🎬 Mejor video", "bv*+ba/b"),
-    (" 2160p (4K)", "bv*[height<=?2160]+ba/b"),
-    (" 1080p (Full HD)", "bv*[height<=?1080]+ba/b"),
-    (" 720p (HD)", "bv*[height<=?720]+ba/b"),
-    (" 480p", "bv*[height<=?480]+ba/b"),
-    (" 360p", "bv*[height<=?360]+ba/b"),
-    ("🎵 Mejor audio (mp3)", "ba/b-mp3-128"),
-    ("🎵 Solo audio (opus)", "ba/b"),
-]
+def _build_format_buttons(fmt_map):
+    """Crea botones inline con los formatos reales del video."""
+    btns = []
+    for b_name in sorted(fmt_map.keys()):
+        tbr_dict = fmt_map[b_name]
+        if len(tbr_dict) == 1:
+            tbr, info = next(iter(tbr_dict.items()))
+            label = f"{b_name} ({human_size(info[0])})" if info[0] else b_name
+            btns.append([InlineKeyboardButton(label, callback_data=f"ytfmt:sub:{b_name}:{tbr}")])
+        else:
+            # Múltiples bitrates para misma calidad: mostrar el primero
+            tbr, info = next(iter(tbr_dict.items()))
+            label = f"{b_name} ({human_size(info[0])})" if info[0] else b_name
+            btns.append([InlineKeyboardButton(label, callback_data=f"ytfmt:sub:{b_name}:{tbr}")])
+    btns.append([InlineKeyboardButton("🎵 Mejor audio", callback_data="ytfmt:audio")])
+    btns.append([InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")])
+    return btns
+
+
+def _build_playlist_buttons():
+    """Botones para descarga de playlists."""
+    return [
+        [InlineKeyboardButton("📋 Mejor calidad", callback_data="ytfmt:pl:bv*+ba/b")],
+        [InlineKeyboardButton("📋 720p", callback_data="ytfmt:pl:bv*[height<=?720]+ba/b")],
+        [InlineKeyboardButton("🎵 Solo audio (mp3)", callback_data="ytfmt:mp3")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")],
+    ]
+
+
+def _build_fallback_buttons():
+    """Botones genéricos cuando no hay format_map."""
+    return [
+        [InlineKeyboardButton("🎬 Mejor video", callback_data="ytfmt:best")],
+        [InlineKeyboardButton("🎵 Mejor audio", callback_data="ytfmt:audio")],
+        [InlineKeyboardButton("🎵 mp3", callback_data="ytfmt:mp3")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")],
+    ]
+
 
 
 @app.on_callback_query(filters.regex(r"^ytfmt:") & ~filters.me)
 async def _ytfmt_cb(client: Client, cb: CallbackQuery):
     uid = cb.from_user.id
-    fmt = cb.data.split(":", 1)[1]
+    raw = cb.data.split(":", 1)[1]
     entry = _ytdl_downloads.get(uid)
     if not entry:
         return await cb.answer("❌ Sesión expirada. Enviá el link de nuevo.", show_alert=True)
+
+    # Resolver formato: soporta tanto formatos genéricos como específicos
+    if raw.startswith("sub:"):
+        # Formato específico: ytfmt:sub:BNAME:TBR
+        parts = raw.split(":", 2)
+        b_name = parts[1]
+        tbr = parts[2]
+        fmt = entry.get("fmt_map", {}).get(b_name, {}).get(tbr, [None, None])[1]
+        if not fmt:
+            return await cb.answer("❌ Formato no disponible.", show_alert=True)
+    elif raw == "best":
+        fmt = "bv*+ba/b"
+    elif raw == "mp3":
+        fmt = "ba/b-mp3-128"
+    elif raw == "audio":
+        fmt = "ba/b"
+    elif raw.startswith("pl:"):
+        fmt = raw[3:] or "bv*+ba/b"
+    else:
+        # Compatibilidad hacia atrás: el raw es el propio formato
+        # (bv*+ba/b, bv*[height<=?1080]+ba/b, etc.)
+        fmt = raw
 
     await cb.message.edit_text(f"📥 <b>Iniciando descarga...</b>\n{_cpu_load()}")
 
@@ -1661,7 +1742,6 @@ async def _ytfmt_cb(client: Client, cb: CallbackQuery):
         await loop.run_in_executor(
             None, lambda: _ytdl_download(entry["url"], dest, fmt, hook)
         )
-        # Encontrar archivos descargados (soporta playlists)
         prefix = f"ytdl_{uid}_"
         files = sorted(
             (p for p in (DATA_DIR / "downloads").iterdir() if p.name.startswith(prefix)),
@@ -1730,24 +1810,18 @@ async def yt_cmd(client: Client, msg: Message):
     playlist_count = len(entries) if entries else 0
 
     _ytdl_downloads[msg.from_user.id] = {
-        "url": url, "status_msg": status.id, "reply_to": msg.id
+        "url": url, "status_msg": status.id, "reply_to": msg.id, "fmt_map": fmt_map
     }
 
-    # Si es playlist, mostrar opciones de playlist
+    # Construir botones según si es playlist o video único
     if is_playlist and playlist_count > 1:
-        buttons = [
-            [InlineKeyboardButton(f"📋 Playlist ({playlist_count} videos) — Mejor calidad", callback_data=f"ytfmt:bv*+ba/b")],
-            [InlineKeyboardButton(f"📋 Playlist — 720p", callback_data=f"ytfmt:bv*[height<=?720]+ba/b")],
-            [InlineKeyboardButton("🎵 Solo audio (mp3)", callback_data="ytfmt:ba/b-mp3-128")],
-            [InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")],
-        ]
+        buttons = _build_playlist_buttons()
         header = f"📋 <b>{title}</b>\n🎵 {playlist_count} videos | 👤 {uploader}\n\n"
+    elif fmt_map:
+        buttons = _build_format_buttons(fmt_map)
+        header = f"📹 <b>{title}</b>\n👤 {uploader} | ⏱️ {dur_str}\n\n"
     else:
-        buttons = [
-            [InlineKeyboardButton(label, callback_data=f"ytfmt:{fmt}")]
-            for label, fmt in YT_FORMATS
-        ]
-        buttons.append([InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")])
+        buttons = _build_fallback_buttons()
         header = f"📹 <b>{title}</b>\n👤 {uploader} | ⏱️ {dur_str}\n\n"
 
     await status.edit_text(
@@ -1813,22 +1887,16 @@ async def _ytdl_auto_cb(client: Client, cb: CallbackQuery):
     entries = result.get("entries")
     playlist_count = len(entries) if entries else 0
 
-    _ytdl_downloads[uid] = {"url": url, "status_msg": cb.message.id, "reply_to": 0}
+    _ytdl_downloads[uid] = {"url": url, "status_msg": cb.message.id, "reply_to": 0, "fmt_map": fmt_map}
 
     if is_playlist and playlist_count > 1:
-        buttons = [
-            [InlineKeyboardButton(f"📋 Playlist ({playlist_count} videos) — Mejor calidad", callback_data=f"ytfmt:bv*+ba/b")],
-            [InlineKeyboardButton(f"📋 Playlist — 720p", callback_data=f"ytfmt:bv*[height<=?720]+ba/b")],
-            [InlineKeyboardButton("🎵 Solo audio (mp3)", callback_data="ytfmt:ba/b-mp3-128")],
-            [InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")],
-        ]
+        buttons = _build_playlist_buttons()
         header = f"📋 <b>{title}</b>\n🎵 {playlist_count} videos | 👤 {uploader}\n\n"
+    elif fmt_map:
+        buttons = _build_format_buttons(fmt_map)
+        header = f"📹 <b>{title}</b>\n👤 {uploader} | ⏱️ {dur_str}\n\n"
     else:
-        buttons = [
-            [InlineKeyboardButton(label, callback_data=f"ytfmt:{fmt}")]
-            for label, fmt in YT_FORMATS
-        ]
-        buttons.append([InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")])
+        buttons = _build_fallback_buttons()
         header = f"📹 <b>{title}</b>\n👤 {uploader} | ⏱️ {dur_str}\n\n"
 
     await cb.message.edit_text(
