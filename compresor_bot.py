@@ -52,6 +52,14 @@ QUALITY_PRESETS = {
 }
 DEFAULT_QUALITY = "balanced"
 
+# Modos de compresión (codec + audio)
+COMPRESSION_MODES = {
+    "hevc_aac":  {"label": "🎯 H.265 + AAC",   "vcodec": "libx265", "acodec": "aac",     "abitrate": "128k", "desc": "Estándar, buena compresión"},
+    "hevc_opus": {"label": "🔊 H.265 + Opus",   "vcodec": "libx265", "acodec": "libopus", "abitrate": "64k",  "desc": "Audio más ligero, misma calidad"},
+    "h264_aac":  {"label": "🔄 H.264 + AAC",    "vcodec": "libx264", "acodec": "aac",     "abitrate": "128k", "desc": "Máxima compatibilidad"},
+}
+DEFAULT_MODE = "hevc_aac"
+
 # Planes
 PLANS = {
     "free": {
@@ -122,6 +130,9 @@ def _init_db():
         output_path TEXT,
         error TEXT
     )""")
+    # Migración: columna mode para cola
+    try: _db_conn.execute("ALTER TABLE queue ADD COLUMN mode TEXT DEFAULT 'hevc_aac'")
+    except: pass
     _db_conn.commit()
 
 def _db():
@@ -232,6 +243,14 @@ def quality_kb(current=None):
         mark = " ✅" if key == current else ""
         kb.append([InlineKeyboardButton(f"{q['label']}{mark}", callback_data=f"qset:{key}")])
     kb.append([InlineKeyboardButton("🔙 Volver", callback_data="menu")])
+    return InlineKeyboardMarkup(kb)
+
+def quality_kb_video(current=None, mode_key=None):
+    kb = []
+    for key, q in QUALITY_PRESETS.items():
+        mark = " ✅" if key == current else ""
+        kb.append([InlineKeyboardButton(f"{q['label']}{mark}", callback_data=f"cqvid:{mode_key}:{key}")])
+    kb.append([InlineKeyboardButton("🔙 Volver", callback_data="cmode:sel")])
     return InlineKeyboardMarkup(kb)
 
 def plans_kb():
@@ -385,25 +404,27 @@ def check_space(path: str, needed_bytes: int) -> bool:
 
 async def ffmpeg_compress(
     input_path: str, output_path: str, quality_key: str,
+    mode_key: str = DEFAULT_MODE,
     progress_callback=None
 ) -> Tuple[bool, str, int]:
     """
-    Comprime un video con libx265.
+    Comprime un video según modo y calidad.
     Retorna (exito, mensaje, duracion_segundos).
     """
+    mode = COMPRESSION_MODES[mode_key]
     quality = QUALITY_PRESETS[quality_key]
     cmd = [
         "ffmpeg", "-i", input_path,
-        "-c:v", "libx265",
+        "-c:v", mode["vcodec"],
         "-crf", str(quality["crf"]),
         "-preset", quality["preset"],
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:a", mode["acodec"], "-b:a", mode["abitrate"],
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
-        "-tag:v", "hvc1",
-        "-stats",
-        "-y", output_path
     ]
+    if mode["vcodec"] == "libx265":
+        cmd += ["-tag:v", "hvc1"]
+    cmd += ["-stats", "-y", output_path]
 
     start = time.time()
     proc = await asyncio.create_subprocess_exec(
@@ -480,6 +501,7 @@ async def ffmpeg_compress(
 _queue_worker_task = None
 _cancellation_flag = set()  # job_ids marcados para cancelación
 _current_proc = None  # proc ffmpeg activo, para matarlo al cancelar
+_pending_videos = {}  # user_id -> {msg_id, chat_id, file_size, username}
 
 async def queue_worker(client: Client):
     """Procesa trabajos de la cola en orden FIFO."""
@@ -510,6 +532,7 @@ async def queue_worker(client: Client):
             msg_id = job["message_id"]
             file_path = job["file_path"]
             quality_key = job.get("quality", DEFAULT_QUALITY)
+            mode_key = job.get("mode", DEFAULT_MODE)
             original_size = job.get("original_size", 0)
 
             # Verificar que el archivo existe (pudo borrarse tras reinicio)
@@ -575,7 +598,7 @@ async def queue_worker(client: Client):
             output_path = str(COMPRESSED_DIR / output_filename)
 
             success, msg, dur = await ffmpeg_compress(
-                file_path, output_path, quality_key, progress_callback
+                file_path, output_path, quality_key, mode_key, progress_callback
             )
 
             # Si fue cancelado durante procesamiento
@@ -918,10 +941,9 @@ async def handle_video(client: Client, msg: Message):
         file_info = msg.video
         file_size = msg.video.file_size or 0
     elif msg.document:
-        # Solo aceptar documentos de video
         mime = msg.document.mime_type or ""
         if not mime.startswith("video/"):
-            return  # ignorar documentos no video
+            return
         file_info = msg.document
         file_size = msg.document.file_size or 0
 
@@ -977,61 +999,18 @@ async def handle_video(client: Client, msg: Message):
         )
         return
 
-    # Descargar
-    status_msg = await msg.reply_text(
-        f"⬇️ <b>Descargando video...</b>\n"
-        f"📏 Tamaño: {human_size(file_size)}\n"
-        f"⚙️ Calidad: {QUALITY_PRESETS.get(u.get('quality', DEFAULT_QUALITY), QUALITY_PRESETS[DEFAULT_QUALITY])['label']}"
-    )
-
-    try:
-        file_path = await client.download_media(
-            msg, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4")
-        )
-    except Exception as e:
-        await status_msg.edit_text(f"❌ <b>Error al descargar:</b> {e}")
-        return
-
-    if not file_path:
-        await status_msg.edit_text("❌ No se pudo descargar el archivo.")
-        return
-
-    # Crear job
-    job_id = str(uuid.uuid4())
-    quality_key = u.get("quality", DEFAULT_QUALITY)
-
-    job = {
-        "id": job_id,
-        "user_id": user_id,
-        "username": msg.from_user.username or "",
-        "chat_id": msg.chat.id,
-        "message_id": msg.id,
-        "file_path": file_path,
-        "original_size": file_size,
-        "quality": quality_key,
-        "status": "waiting",
-        "progress": 0,
-        "created_at": datetime.now().isoformat(),
-        "status_msg_id": status_msg.id
+    # Guardar pending y mostrar selección de modo
+    _pending_videos[user_id] = {
+        "msg_id": msg.id, "chat_id": msg.chat.id,
+        "file_size": file_size, "username": msg.from_user.username or "",
     }
 
-    await add_to_queue(job)
-
-    queue = await load_queue()
-    position = sum(1 for j in queue if j["status"] == "waiting" and j["id"] != job_id) + 1
-
-    await status_msg.edit_text(
-        f"✅ <b>Video añadido a la cola</b>\n"
-        f"🆔 ID: <code>{job_id[:8]}</code>\n"
-        f"📏 Tamaño: {human_size(file_size)}\n"
-        f"⚙️ Calidad: {QUALITY_PRESETS[quality_key]['label']}\n"
-        f"📌 Posición en cola: #{position}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏳ <i>Espera mientras se procesa...</i>",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧵 Ver Cola", callback_data="queue"),
-             InlineKeyboardButton("❌ Cancelar", callback_data=f"cnfrm_cancel:{job_id}")]
-        ])
+    rows = [[InlineKeyboardButton(m["label"], callback_data=f"cmode:{k}")] for k, m in COMPRESSION_MODES.items()]
+    rows.append([InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")])
+    await msg.reply_text(
+        f"📹 <b>Video recibido</b>\n📏 Tamaño: {human_size(file_size)}\n\n"
+        f"<b>Seleccioná el modo de compresión:</b>",
+        reply_markup=InlineKeyboardMarkup(rows)
     )
 
 
@@ -1045,7 +1024,78 @@ async def handle_callback(client: Client, cb: CallbackQuery):
     user_id = cb.from_user.id
 
     try:
-        if data == "menu":
+        if data == "del_pending":
+            _pending_videos.pop(user_id, None)
+            await cb.message.edit_text("❌ Compresión cancelada.")
+
+        elif data.startswith("cmode:"):
+            mode_key = data.split(":", 1)[1]
+            if mode_key == "sel":
+                pending = _pending_videos.get(user_id)
+                if not pending: return await cb.answer("❌ Expirado", show_alert=True)
+                rows = [[InlineKeyboardButton(m["label"], callback_data=f"cmode:{k}")] for k, m in COMPRESSION_MODES.items()]
+                rows.append([InlineKeyboardButton("❌ Cancelar", callback_data="del_pending")])
+                await cb.message.edit_text("📹 <b>Seleccioná el modo de compresión:</b>", reply_markup=InlineKeyboardMarkup(rows))
+                return
+            pending = _pending_videos.get(user_id)
+            if not pending: return await cb.answer("❌ Sesión expirada. Enviá el video de nuevo.", show_alert=True)
+            pending["mode"] = mode_key
+            u = await get_user(user_id)
+            await cb.message.edit_text(
+                f"🎛️ <b>Seleccioná la calidad:</b>\nModo: {COMPRESSION_MODES[mode_key]['label']}",
+                reply_markup=quality_kb_video(u.get("quality", DEFAULT_QUALITY), mode_key)
+            )
+
+        elif data.startswith("cqvid:"):
+            _, mode_key, quality_key = data.split(":", 2)
+            pending = _pending_videos.get(user_id)
+            if not pending: return await cb.answer("❌ Sesión expirada. Enviá el video de nuevo.", show_alert=True)
+
+            await cb.message.edit_text(
+                f"⬇️ <b>Descargando video...</b>\n📏 Tamaño: {human_size(pending['file_size'])}\n"
+                f"🎛️ {COMPRESSION_MODES[mode_key]['label']} | {QUALITY_PRESETS[quality_key]['label']}"
+            )
+
+            try:
+                orig = await client.get_messages(pending["chat_id"], pending["msg_id"])
+                file_path = await client.download_media(orig, file_name=str(DOWNLOADS_DIR / f"{user_id}_{int(time.time())}.mp4"))
+            except Exception as e:
+                _pending_videos.pop(user_id, None)
+                await cb.message.edit_text(f"❌ <b>Error al descargar:</b> {e}")
+                return
+
+            if not file_path:
+                _pending_videos.pop(user_id, None)
+                await cb.message.edit_text("❌ No se pudo descargar el archivo.")
+                return
+
+            job_id = str(uuid.uuid4())
+            await add_to_queue({
+                "id": job_id, "user_id": user_id,
+                "username": pending.get("username", ""),
+                "chat_id": pending["chat_id"], "message_id": pending["msg_id"],
+                "file_path": file_path, "original_size": pending["file_size"],
+                "quality": quality_key, "mode": mode_key,
+                "status": "waiting", "progress": 0,
+                "created_at": datetime.now().isoformat(),
+                "status_msg_id": cb.message.id,
+            })
+
+            _pending_videos.pop(user_id, None)
+            queue = await load_queue()
+            pos = sum(1 for j in queue if j["status"] == "waiting" and j["id"] != job_id) + 1
+            await cb.message.edit_text(
+                f"✅ <b>Video añadido a la cola</b>\n🆔 ID: <code>{job_id[:8]}</code>\n"
+                f"📏 Tamaño: {human_size(pending['file_size'])}\n"
+                f"🎛️ {COMPRESSION_MODES[mode_key]['label']} | {QUALITY_PRESETS[quality_key]['label']}\n"
+                f"📌 Posición: #{pos}\n━━━━━━━━━━━━━━━━━━━━━\n⏳ <i>Espera mientras se procesa...</i>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🧵 Ver Cola", callback_data="queue"),
+                     InlineKeyboardButton("❌ Cancelar", callback_data=f"cnfrm_cancel:{job_id}")]
+                ])
+            )
+
+        elif data == "menu":
             u = await get_user(user_id)
             plan_name = PLANS.get(u["plan"], PLANS["free"])["name"]
             await cb.message.edit_text(
