@@ -342,7 +342,7 @@ def _profile_text(u, user_id, first_name):
         f"⚙️ Calidad: {quality_label}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Estadísticas</b>\n"
-        f"🗜️ Comprisiones: {u.get('total_compressions', 0)}\n"
+        f"🗜️ Compresiones: {u.get('total_compressions', 0)}\n"
         f"💾 Datos ahorrados: {human_size(u.get('total_saved_bytes', 0))}\n"
         f"📅 Hoy: {u.get('daily_count', 0)}/{limit_str}"
     )
@@ -353,7 +353,7 @@ def _plan_text(u):
         f"📋 <b>Tu Plan: {plan['name']}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 Precio: {plan['price']}\n"
-        f"📅 Comprisiones/día: {plan['daily'] if plan['daily'] > 0 else '∞ Ilimitado'}\n"
+        f"📅 Compresiones/día: {plan['daily'] if plan['daily'] > 0 else '∞ Ilimitado'}\n"
         f"📦 Máx por archivo: {plan['max_mb']}MB\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Características:</b>\n" + "\n".join(f"• {f}" for f in plan['features'])
@@ -409,6 +409,8 @@ async def ffmpeg_compress(
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+    global _current_proc
+    _current_proc = proc
 
     # Parse progress from FFmpeg stderr
     last_update = 0
@@ -460,11 +462,14 @@ async def ffmpeg_compress(
     duration = int(time.time() - start)
 
     if proc.returncode != 0:
+        _current_proc = None
         return False, f"FFmpeg error (código {proc.returncode})", duration
 
     if not os.path.exists(output_path) or os.path.getsize(output_path) < 100:
+        _current_proc = None
         return False, "El archivo de salida no se generó correctamente", duration
 
+    _current_proc = None
     return True, "Compresión exitosa", duration
 
 
@@ -474,11 +479,10 @@ async def ffmpeg_compress(
 
 _queue_worker_task = None
 _cancellation_flag = set()  # job_ids marcados para cancelación
-_current_job_id = None
+_current_proc = None  # proc ffmpeg activo, para matarlo al cancelar
 
 async def queue_worker(client: Client):
     """Procesa trabajos de la cola en orden FIFO."""
-    global _current_job_id
     while True:
         try:
             q = await load_queue()
@@ -499,7 +503,6 @@ async def queue_worker(client: Client):
                 await asyncio.sleep(2)
                 continue
 
-            _current_job_id = job["id"]
             await update_job(job["id"], status="processing")
 
             user_id = job["user_id"]
@@ -519,7 +522,6 @@ async def queue_worker(client: Client):
                     )
                 except: pass
                 await remove_from_queue(job["id"])
-                _current_job_id = None
                 continue
 
             # Verificar si fue cancelado
@@ -532,7 +534,6 @@ async def queue_worker(client: Client):
                         reply_to_message_id=msg_id
                     )
                 except: pass
-                _current_job_id = None
                 continue
 
             # Notificar inicio
@@ -552,6 +553,9 @@ async def queue_worker(client: Client):
             # Callback de progreso
             async def progress_callback(pct, _job_id=job["id"], _cid=chat_id, _smid=job.get("status_msg_id")):
                 if _job_id in _cancellation_flag:
+                    if _current_proc:
+                        try: _current_proc.kill()
+                        except: pass
                     return
                 try:
                     # También actualizar job en db
@@ -587,7 +591,6 @@ async def queue_worker(client: Client):
                         "❌ Compresión cancelada."
                     )
                 except: pass
-                _current_job_id = None
                 continue
 
             if not success:
@@ -601,7 +604,6 @@ async def queue_worker(client: Client):
                 for p in [file_path, output_path]:
                     try: os.remove(p)
                     except: pass
-                _current_job_id = None
                 continue
 
             compressed_size = os.path.getsize(output_path)
@@ -682,12 +684,10 @@ async def queue_worker(client: Client):
 
             # Remover job de cola
             await remove_from_queue(job["id"])
-            _current_job_id = None
 
         except Exception as e:
             print(f"[Queue Worker Error] {traceback.format_exc()}")
             await asyncio.sleep(5)
-            _current_job_id = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1187,7 +1187,7 @@ async def handle_callback(client: Client, cb: CallbackQuery):
                 f"📊 <b>Estadísticas del Bot</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"👥 Usuarios totales: {total_users}\n"
-                f"🗜️ Comprisiones totales: {total_compressions}\n"
+                f"🗜️ Compresiones totales: {total_compressions}\n"
                 f"💾 Datos ahorrados: {human_size(total_saved)}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔄 Cola activa: {active}\n"
@@ -1283,7 +1283,7 @@ async def stats_cmd(client: Client, msg: Message):
         f"📊 Estadísticas:\n"
         f"Usuarios: {len(users)}\n"
         f"Cola activa: {active}\n"
-        f"Comprisiones totales: {sum(u.get('total_compressions', 0) for u in users.values())}"
+        f"Compresiones totales: {sum(u.get('total_compressions', 0) for u in users.values())}"
     )
     await msg.reply_text(txt)
 
@@ -1363,7 +1363,7 @@ async def show_plans(msg_or_cb, edit=False):
 
 
 async def show_queue(msg_or_cb, edit=False):
-    user_id = msg_or_cb.from_user.id if hasattr(msg_or_cb, 'from_user') else msg_or_cb.chat.id
+    user_id = msg_or_cb.from_user.id
     q = await load_queue()
     user_jobs = [j for j in q if j["user_id"] == user_id]
     all_waiting = [j for j in q if j["status"] == "waiting"]
@@ -1468,11 +1468,13 @@ async def startup():
     print("━" * 40)
 
 
+async def main():
+    await startup()
+    await idle()
+
 if __name__ == "__main__":
     try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(startup())
-        app.run()
+        app.run(main())
     except KeyboardInterrupt:
         print("\n👋 Bot detenido por el usuario.")
     except Exception:
